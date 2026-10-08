@@ -1,5 +1,6 @@
 package net.medievalrp.spyglass.plugin.listener.item;
 
+import com.destroystokyo.paper.event.server.ServerTickEndEvent;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -77,26 +78,22 @@ public final class HopperTransferListener implements RecordingListener {
     private final Recorder recorder;
     private final RecordingSupport support;
     private final Executor serializer;
-    // Main-thread, next-tick: where the per-slot diff runs, after the move
-    // (and everything else this tick) has applied.
-    private final Executor nextTick;
     // Per-event gating: the plugin gates only at listener-registration
     // granularity, so the independent toggles must be honoured here. Live,
     // thread-safe view of the enabled set.
     private final Set<String> enabledEvents;
 
-    // MAIN THREAD ONLY (event handler + next-tick drain): endpoints touched
-    // this tick, keyed by position so several same-tick events against one
-    // container share a single snapshot and diff.
+    // Guarded by itself: Leaf/SparklyPaper tick worlds on parallel threads, so
+    // move events arrive concurrently. Endpoints touched this tick, keyed by
+    // position so several same-tick events against one container share a
+    // single snapshot and diff. Drained at tick end, after every world ticked.
     private final Map<String, PendingEndpoint> pending = new LinkedHashMap<>();
-    private boolean drainScheduled = false;
 
     public HopperTransferListener(Recorder recorder, RecordingSupport support, Executor serializer,
-            Executor nextTick, Set<String> enabledEvents) {
+            Set<String> enabledEvents) {
         this.recorder = recorder;
         this.support = support;
         this.serializer = serializer;
-        this.nextTick = nextTick;
         this.enabledEvents = enabledEvents;
     }
 
@@ -125,11 +122,13 @@ public final class HopperTransferListener implements RecordingListener {
         // Both endpoints register the move; the diff decides direction per
         // slot, and the per-direction toggles apply at emit time.
         ItemStack moved = item.clone();
-        registerEndpoint(event.getSource(), moved, false, mover);
-        registerEndpoint(event.getDestination(), moved, true, mover);
+        synchronized (pending) {
+            registerEndpoint(event.getSource(), moved, false, mover);
+            registerEndpoint(event.getDestination(), moved, true, mover);
+        }
     }
 
-    /** MAIN THREAD: note the move against the endpoint; a pure-destination
+    /** Holding the pending lock: note the move against the endpoint; a pure-destination
      *  endpoint also snapshots its (still unwritten) contents. No-op for
      *  inventories with no world position. */
     private void registerEndpoint(Inventory inventory, ItemStack moved, boolean intoThis,
@@ -156,10 +155,6 @@ public final class HopperTransferListener implements RecordingListener {
             endpoint.snapshot = null;
         }
         endpoint.moves.add(new Move(moved, intoThis));
-        if (!drainScheduled) {
-            drainScheduled = true;
-            nextTick.execute(this::drain);
-        }
     }
 
     private static ItemStack[] cloneContents(Inventory inventory) {
@@ -172,12 +167,19 @@ public final class HopperTransferListener implements RecordingListener {
         return out;
     }
 
-    /** MAIN THREAD, next tick: resolve every touched endpoint's before-state
-     *  and emit one record per changed slot. */
-    private void drain() {
-        drainScheduled = false;
-        List<PendingEndpoint> batch = new ArrayList<>(pending.values());
-        pending.clear();
+    /** MAIN THREAD, tick end (no world is ticking): resolve every touched
+     *  endpoint's before-state and emit one record per changed slot. Not the
+     *  scheduler: Leaf runs a task queued from a world thread inline. */
+    @EventHandler
+    public void onTickEnd(ServerTickEndEvent event) {
+        List<PendingEndpoint> batch;
+        synchronized (pending) {
+            if (pending.isEmpty()) {
+                return;
+            }
+            batch = new ArrayList<>(pending.values());
+            pending.clear();
+        }
         boolean logWithdraw = enabledEvents.contains("transfer-withdraw");
         boolean logDeposit = enabledEvents.contains("transfer-deposit");
         Instant occurred = support.now();

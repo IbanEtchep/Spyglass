@@ -48,7 +48,6 @@ class HopperTransferListenerTest {
     private final CapturingRecorder recorder = new CapturingRecorder();
     private final RecordingSupport support = new RecordingSupport(Duration.parse("4w"), "test");
     private final List<Runnable> serializer = new ArrayList<>();
-    private final List<Runnable> nextTick = new ArrayList<>();
     // Strong ref so Location's weak World reference can't be collected mid-test.
     private final World world = mock(World.class);
 
@@ -64,14 +63,13 @@ class HopperTransferListenerTest {
 
         // Nothing recorded inline; nothing even diffed yet.
         assertThat(recorder.records).isEmpty();
-        assertThat(nextTick).hasSize(1);
 
         // The move applied: source slot 1 dropped to 4, dest slot 0 gained 1.
         ItemStack hoisted1 = mockStack(Material.COBBLESTONE, 4);
         when(source.getItem(1)).thenReturn(hoisted1);
         ItemStack hoisted2 = mockStack(Material.COBBLESTONE, 1);
         when(dest.getItem(0)).thenReturn(hoisted2);
-        nextTick.forEach(Runnable::run);
+        listener.onTickEnd(null);
         assertThat(recorder.records).as("records build on the serializer, not inline").isEmpty();
         serializer.forEach(Runnable::run);
 
@@ -101,13 +99,12 @@ class HopperTransferListenerTest {
         // Two moves against the same endpoints in one tick.
         listener.onInventoryMoveItem(move(source, dest, mockStack(Material.COBBLESTONE, 1)));
         listener.onInventoryMoveItem(move(source, dest, mockStack(Material.COBBLESTONE, 1)));
-        assertThat(nextTick).as("one drain per tick, not one per move").hasSize(1);
 
         ItemStack hoisted4 = mockStack(Material.COBBLESTONE, 3);
         when(source.getItem(0)).thenReturn(hoisted4);
         ItemStack hoisted5 = mockStack(Material.COBBLESTONE, 2);
         when(dest.getItem(0)).thenReturn(hoisted5);
-        nextTick.forEach(Runnable::run);
+        listener.onTickEnd(null);
         serializer.forEach(Runnable::run);
 
         assertThat(recorder.records).hasSize(2);
@@ -128,7 +125,7 @@ class HopperTransferListenerTest {
         when(source.getItem(0)).thenReturn(hoisted7);
         ItemStack hoisted8 = mockStack(Material.COBBLESTONE, 1);
         when(dest.getItem(0)).thenReturn(hoisted8);
-        nextTick.forEach(Runnable::run);
+        listener.onTickEnd(null);
         serializer.forEach(Runnable::run);
 
         assertThat(recorder.records).hasSize(1);
@@ -143,7 +140,6 @@ class HopperTransferListenerTest {
 
         listener.onInventoryMoveItem(move(source, dest, mockStack(Material.COBBLESTONE, 1)));
 
-        assertThat(nextTick).isEmpty();
         assertThat(serializer).isEmpty();
         assertThat(recorder.records).isEmpty();
     }
@@ -156,7 +152,6 @@ class HopperTransferListenerTest {
 
         listener.onInventoryMoveItem(move(inventory(64, 3), inventory(63, 5), air));
 
-        assertThat(nextTick).isEmpty();
         assertThat(recorder.records).isEmpty();
         verify(air, never()).clone();
     }
@@ -171,7 +166,7 @@ class HopperTransferListenerTest {
         listener.onInventoryMoveItem(move(source, dest, mockStack(Material.COBBLESTONE, 1)));
         ItemStack hoisted9 = mockStack(Material.COBBLESTONE, 1);
         when(dest.getItem(0)).thenReturn(hoisted9);
-        nextTick.forEach(Runnable::run);
+        listener.onTickEnd(null);
         serializer.forEach(Runnable::run);
 
         assertThat(recorder.records).hasSize(1);
@@ -194,7 +189,7 @@ class HopperTransferListenerTest {
         // A player dropped gold into another dest slot the same tick.
         ItemStack hoisted13 = mockStack(Material.GOLD_INGOT, 7);
         when(dest.getItem(3)).thenReturn(hoisted13);
-        nextTick.forEach(Runnable::run);
+        listener.onTickEnd(null);
         serializer.forEach(Runnable::run);
 
         assertThat(recorder.records).hasSize(2);
@@ -220,7 +215,7 @@ class HopperTransferListenerTest {
         when(source.getItem(30)).thenReturn(hoisted15);
         ItemStack hoisted16 = mockStack(Material.COBBLESTONE, 1);
         when(dest.getItem(0)).thenReturn(hoisted16);
-        nextTick.forEach(Runnable::run);
+        listener.onTickEnd(null);
         serializer.forEach(Runnable::run);
 
         ContainerWithdrawRecord out = (ContainerWithdrawRecord) find("transfer-withdraw");
@@ -231,7 +226,7 @@ class HopperTransferListenerTest {
     // ── fixtures ─────────────────────────────────────────────────
 
     private HopperTransferListener listener(Set<String> enabled) {
-        return new HopperTransferListener(recorder, support, serializer::add, nextTick::add, enabled);
+        return new HopperTransferListener(recorder, support, serializer::add, enabled);
     }
 
     private static Set<String> enabled(String... names) {
